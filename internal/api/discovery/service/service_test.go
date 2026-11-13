@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v5"
 	databaseModel "github.com/perses/perses/internal/api/database/model"
@@ -29,6 +30,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const testRefreshInterval = 5 * time.Minute
+
+// fakeClock is a deterministic clock for tests.
+type fakeClock struct{ now time.Time }
+
+func (f *fakeClock) Now() time.Time { return f.now }
 
 // fakeGlobalDatasourceService is an in-memory implementation of globaldatasource.Service for testing.
 type fakeGlobalDatasourceService struct {
@@ -79,12 +87,8 @@ func (f *fakeGlobalDatasourceService) List(q *globaldatasource.Query) ([]*v1.Glo
 	if f.listError != nil {
 		return nil, f.listError
 	}
-	var result []*v1.GlobalDatasource
-	for _, ds := range f.store {
-		result = append(result, ds)
-	}
 	var filtered []*v1.GlobalDatasource
-	for _, ds := range result {
+	for _, ds := range f.store {
 		disc := ds.Source.GetDiscovery()
 		if q.DiscoveryName != "" && (disc == nil || disc.Name != q.DiscoveryName) {
 			continue
@@ -120,13 +124,18 @@ func makeEntity(name string) *v1.GlobalDatasource {
 }
 
 func storeEntity(name string, discoveryName string) *v1.GlobalDatasource {
+	return storeEntityWithLastSeen(name, discoveryName, time.Time{})
+}
+
+func storeEntityWithLastSeen(name string, discoveryName string, lastSeen time.Time) *v1.GlobalDatasource {
 	return &v1.GlobalDatasource{
 		Kind:     v1.KindGlobalDatasource,
 		Metadata: v1.Metadata{Name: name},
 		Source: &v1.Source{
 			Discovery: &v1.DiscoverySource{
-				Name: discoveryName,
-				Type: v1.DiscoveryTypeKubernetes,
+				Name:     discoveryName,
+				Type:     v1.DiscoveryTypeKubernetes,
+				LastSeen: lastSeen,
 			},
 		},
 		Spec: datasourceSpec.Spec{},
@@ -141,11 +150,15 @@ func storeNames(svc *fakeGlobalDatasourceService) []string {
 	return names
 }
 
+func newSvc(fake *fakeGlobalDatasourceService) *ApplyService {
+	return New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes}, testRefreshInterval)
+}
+
 // tests
 
 func TestApply_StampsSourceAndDiscoveryName(t *testing.T) {
 	fake := newFakeService()
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
 
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1"), makeEntity("ds-a2")})
 
@@ -157,17 +170,21 @@ func TestApply_StampsSourceAndDiscoveryName(t *testing.T) {
 		require.NotNil(t, ds.Source.Discovery)
 		assert.Equal(t, "kube-prod", ds.Source.Discovery.Name)
 		assert.Equal(t, v1.DiscoveryTypeKubernetes, ds.Source.Discovery.Type)
+		assert.False(t, ds.Source.Discovery.LastSeen.IsZero(), "LastSeen must be stamped on create")
 	}
 }
 
 func TestApply_DeletesStaleEntriesScopedToDiscovery(t *testing.T) {
-	// Pre-populate: kube-prod owns ds-a1 and ds-a2; kube-staging owns ds-b1.
+	now := time.Now()
+	// ds-a2 was last seen more than 2× refresh_interval ago — eligible for deletion.
+	stale := storeEntityWithLastSeen("ds-a2", "kube-prod", now.Add(-3*testRefreshInterval))
 	fake := newFakeService(
-		storeEntity("ds-a1", "kube-prod"),
-		storeEntity("ds-a2", "kube-prod"),
-		storeEntity("ds-b1", "kube-staging"),
+		storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-3*testRefreshInterval)),
+		stale,
+		storeEntityWithLastSeen("ds-b1", "kube-staging", now.Add(-3*testRefreshInterval)),
 	)
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: now}
 
 	// kube-prod's new result contains only ds-a1 — ds-a2 has disappeared.
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
@@ -176,28 +193,61 @@ func TestApply_DeletesStaleEntriesScopedToDiscovery(t *testing.T) {
 		"ds-a2 should be deleted; ds-b1 (owned by kube-staging) must not be touched")
 }
 
-func TestApply_NoDeleteWhenListErrors(t *testing.T) {
+func TestApply_RespectsGracePeriod(t *testing.T) {
+	now := time.Now()
+	// ds-a2 disappeared but was seen only 1× refresh_interval ago — within grace period.
 	fake := newFakeService(
-		storeEntity("ds-a1", "kube-prod"),
-		storeEntity("ds-a2", "kube-prod"),
+		storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-3*testRefreshInterval)),
+		storeEntityWithLastSeen("ds-a2", "kube-prod", now.Add(-1*testRefreshInterval)),
+	)
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: now}
+
+	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+
+	assert.ElementsMatch(t, []string{"ds-a1", "ds-a2"}, storeNames(fake),
+		"ds-a2 must not be deleted while still within the grace period")
+}
+
+func TestApply_NeverDeletesZeroLastSeen(t *testing.T) {
+	// ds-a2 has a zero LastSeen — it was adopted but never refreshed; must not be deleted.
+	fake := newFakeService(
+		storeEntityWithLastSeen("ds-a1", "kube-prod", time.Now().Add(-3*testRefreshInterval)),
+		storeEntity("ds-a2", "kube-prod"), // zero LastSeen
+	)
+	svc := newSvc(fake)
+
+	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+
+	assert.ElementsMatch(t, []string{"ds-a1", "ds-a2"}, storeNames(fake),
+		"ds-a2 must not be deleted when LastSeen is zero")
+}
+
+func TestApply_NoDeleteWhenListErrors(t *testing.T) {
+	now := time.Now()
+	fake := newFakeService(
+		storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-3*testRefreshInterval)),
+		storeEntityWithLastSeen("ds-a2", "kube-prod", now.Add(-3*testRefreshInterval)),
 	)
 	fake.listError = fmt.Errorf("database unavailable")
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: now}
 
-	// Apply with an empty list — without the guard, this would delete everything.
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{})
+	// ds-a1 is still discovered; ds-a2 is not — but List fails, so no deletion should occur.
+	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
 
 	assert.ElementsMatch(t, []string{"ds-a1", "ds-a2"}, storeNames(fake),
 		"no deletes should happen when List returns an error")
 }
 
 func TestApply_UpdatesExistingOwnedDatasource(t *testing.T) {
-	existing := storeEntity("ds-a1", "kube-prod")
+	now := time.Now()
+	existing := storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-2*testRefreshInterval))
 	existing.Spec.Default = false
 	fake := newFakeService(existing)
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: now}
 
-	// ds-a1 is re-discovered; Apply should update it (conflict → Get → ownership match → Update).
 	updated := makeEntity("ds-a1")
 	updated.Spec.Default = true
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{updated})
@@ -206,13 +256,13 @@ func TestApply_UpdatesExistingOwnedDatasource(t *testing.T) {
 	require.NotNil(t, ds)
 	assert.True(t, ds.Spec.Default, "spec should be updated")
 	require.NotNil(t, ds.Source.GetDiscovery())
-	assert.Equal(t, "kube-prod", ds.Source.Discovery.Name, "source must be stamped after update")
+	assert.Equal(t, "kube-prod", ds.Source.Discovery.Name)
+	assert.False(t, ds.Source.Discovery.LastSeen.IsZero(), "LastSeen must be refreshed on update")
 }
 
 func TestApply_DoesNotTakeOverAnotherDiscoverysDatasource(t *testing.T) {
-	// ds-b1 is owned by kube-staging; kube-prod must not overwrite it.
 	fake := newFakeService(storeEntity("ds-b1", "kube-staging"))
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
 
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-b1")})
 
@@ -222,10 +272,9 @@ func TestApply_DoesNotTakeOverAnotherDiscoverysDatasource(t *testing.T) {
 }
 
 func TestApply_AdoptsNilSourceDatasource(t *testing.T) {
-	// ds-manual was created before discovery; it has no Source.
 	manual := makeEntity("ds-manual")
 	fake := newFakeService(manual)
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
 
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-manual")})
 
@@ -236,20 +285,56 @@ func TestApply_AdoptsNilSourceDatasource(t *testing.T) {
 }
 
 func TestApplyService_PreservesDefault(t *testing.T) {
-	// Pre-existing datasource is marked as default; Apply must not clear that flag.
-	existing := storeEntity("ds-a1", "kube-prod")
+	now := time.Now()
+	existing := storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-2*testRefreshInterval))
 	existing.Spec.Default = true
 	fake := newFakeService(existing)
-	svc := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes})
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: now}
 
-	// The newly discovered entity does NOT have Default set.
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
 
 	ds := fake.store["ds-a1"]
 	require.NotNil(t, ds)
-	// The fake Update stores whatever is passed; what matters is that the Apply loop
-	// does not strip the Source, and the caller (kubernetes discovery) sets Default before Apply.
-	// Here we verify the source is preserved after the conflict→update path.
 	require.NotNil(t, ds.Source.GetDiscovery())
 	assert.Equal(t, "kube-prod", ds.Source.Discovery.Name)
+}
+
+func TestApply_MultiReplica_SecondReplicaSkipsUpdateWhenRecentAndSpecUnchanged(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// Replica 1 ran at t1 and stamped LastSeen.
+	existing := storeEntityWithLastSeen("ds-a1", "kube-prod", t1)
+	fake := newFakeService(existing)
+
+	// Replica 2 runs at t1 + 30s (well within refresh_interval of 5m).
+	t2 := t1.Add(30 * time.Second)
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: t2}
+
+	// Spec is unchanged.
+	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+
+	// Update must NOT have been called — LastSeen should still be t1.
+	ds := fake.store["ds-a1"]
+	require.NotNil(t, ds)
+	assert.Equal(t, t1, ds.Source.Discovery.LastSeen,
+		"second replica must not overwrite LastSeen when spec is unchanged and LastSeen is recent")
+}
+
+func TestApply_MultiReplica_UpdatesWhenLastSeenExpired(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	existing := storeEntityWithLastSeen("ds-a1", "kube-prod", t1)
+	fake := newFakeService(existing)
+
+	// Replica runs after more than one refresh_interval has elapsed.
+	t2 := t1.Add(testRefreshInterval + time.Second)
+	svc := newSvc(fake)
+	svc.clock = &fakeClock{now: t2}
+
+	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+
+	ds := fake.store["ds-a1"]
+	require.NotNil(t, ds)
+	assert.Equal(t, t2, ds.Source.Discovery.LastSeen,
+		"LastSeen must be updated once the previous stamp has expired")
 }
