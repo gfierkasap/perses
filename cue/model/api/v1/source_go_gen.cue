@@ -15,8 +15,9 @@ package v1
 
 // DiscoverySource identifies the datasource discovery configuration that created a datasource.
 #DiscoverySource: {
-	name: string         @go(Name)
-	type: #DiscoveryType @go(Type)
+	name:       string         @go(Name)
+	type:       #DiscoveryType @go(Type)
+	last_seen?: string         @go(LastSeen,time.Time)
 }
 
 // Source records where a GlobalDatasource came from.

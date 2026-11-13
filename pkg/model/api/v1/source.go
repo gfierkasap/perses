@@ -16,6 +16,7 @@ package v1
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type DiscoveryType string
@@ -45,6 +46,12 @@ func (d *DiscoveryType) UnmarshalJSON(data []byte) error {
 type DiscoverySource struct {
 	Name string        `json:"name" yaml:"name"`
 	Type DiscoveryType `json:"type" yaml:"type"`
+	// LastSeen is the time at which this discovery last successfully wrote this datasource.
+	// It is used to implement the grace-period deletion: a datasource is only deleted once
+	// it has been absent from discovery results for at least 2 × refresh_interval.
+	// A zero LastSeen means the datasource was adopted from a pre-discovery era and has not
+	// yet been refreshed; it must not be deleted until LastSeen is set.
+	LastSeen time.Time `json:"last_seen,omitempty" yaml:"last_seen,omitempty"`
 }
 
 func (ds *DiscoverySource) validate() error {
