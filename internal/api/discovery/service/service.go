@@ -16,7 +16,6 @@ package service
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	databaseModel "github.com/perses/perses/internal/api/database/model"
@@ -169,7 +168,7 @@ func specEqual(a, b *v1.GlobalDatasource) bool {
 
 func containsDatasource(sources []string, name string) bool {
 	for _, ds := range sources {
-		if strings.EqualFold(ds, name) {
+		if ds == name {
 			return true
 		}
 	}
