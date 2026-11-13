@@ -160,7 +160,7 @@ func TestApply_StampsSourceAndDiscoveryName(t *testing.T) {
 	fake := newFakeService()
 	svc := newSvc(fake)
 
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1"), makeEntity("ds-a2")})
+	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1"), makeEntity("ds-a2")}))
 
 	require.Len(t, fake.store, 2)
 	for _, name := range []string{"ds-a1", "ds-a2"} {
@@ -187,7 +187,7 @@ func TestApply_DeletesStaleEntriesScopedToDiscovery(t *testing.T) {
 	svc.clock = &fakeClock{now: now}
 
 	// kube-prod's new result contains only ds-a1 — ds-a2 has disappeared.
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")}))
 
 	assert.ElementsMatch(t, []string{"ds-a1", "ds-b1"}, storeNames(fake),
 		"ds-a2 should be deleted; ds-b1 (owned by kube-staging) must not be touched")
@@ -234,7 +234,7 @@ func TestApply_NoDeleteWhenListErrors(t *testing.T) {
 	svc.clock = &fakeClock{now: now}
 
 	// ds-a1 is still discovered; ds-a2 is not — but List fails, so no deletion should occur.
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+	assert.Error(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")}))
 
 	assert.ElementsMatch(t, []string{"ds-a1", "ds-a2"}, storeNames(fake),
 		"no deletes should happen when List returns an error")
@@ -250,7 +250,7 @@ func TestApply_UpdatesExistingOwnedDatasource(t *testing.T) {
 
 	updated := makeEntity("ds-a1")
 	updated.Spec.Default = true
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{updated})
+	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{updated}))
 
 	ds := fake.store["ds-a1"]
 	require.NotNil(t, ds)
@@ -264,7 +264,8 @@ func TestApply_DoesNotTakeOverAnotherDiscoverysDatasource(t *testing.T) {
 	fake := newFakeService(storeEntity("ds-b1", "kube-staging"))
 	svc := newSvc(fake)
 
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-b1")})
+	assert.Error(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-b1")}),
+		"attempting to claim another discovery's datasource should return an error")
 
 	ds := fake.store["ds-b1"]
 	require.NotNil(t, ds)
@@ -276,7 +277,7 @@ func TestApply_AdoptsNilSourceDatasource(t *testing.T) {
 	fake := newFakeService(manual)
 	svc := newSvc(fake)
 
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-manual")})
+	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-manual")}))
 
 	ds := fake.store["ds-manual"]
 	require.NotNil(t, ds)
@@ -292,7 +293,8 @@ func TestApplyService_PreservesDefault(t *testing.T) {
 	svc := newSvc(fake)
 	svc.clock = &fakeClock{now: now}
 
-	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
+	// The newly discovered entity does NOT have Default set.
+	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")}))
 
 	ds := fake.store["ds-a1"]
 	require.NotNil(t, ds)
