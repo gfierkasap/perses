@@ -54,6 +54,15 @@ type DiscoverySource struct {
 	LastSeen time.Time `json:"last_seen,omitempty" yaml:"last_seen,omitempty"`
 }
 
+// Validate checks that the DiscoverySource is well-formed.
+// A DiscoverySource must have a non-empty Name.
+func (d DiscoverySource) Validate() error {
+	if d.Name == "" {
+		return fmt.Errorf("discovery source name must not be empty")
+	}
+	return nil
+}
+
 // Source records where a GlobalDatasource came from.
 // A nil Source means the datasource was not created by a discovery process:
 // it may have been created manually via the API, provisioned via DaC, or

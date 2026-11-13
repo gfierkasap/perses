@@ -34,14 +34,17 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
-func New(caseSensitive bool, svc globaldatasource.Service, discoverySource v1.DiscoverySource, refreshInterval time.Duration) *ApplyService {
+func New(caseSensitive bool, svc globaldatasource.Service, discoverySource v1.DiscoverySource, refreshInterval time.Duration) (*ApplyService, error) {
+	if err := discoverySource.Validate(); err != nil {
+		return nil, err
+	}
 	return &ApplyService{
 		caseSensitive:   caseSensitive,
 		svc:             svc,
 		discoverySource: discoverySource,
 		refreshInterval: refreshInterval,
 		clock:           realClock{},
-	}
+	}, nil
 }
 
 type ApplyService struct {

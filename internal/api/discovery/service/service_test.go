@@ -150,15 +150,18 @@ func storeNames(svc *fakeGlobalDatasourceService) []string {
 	return names
 }
 
-func newSvc(fake *fakeGlobalDatasourceService) *ApplyService {
-	return New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes}, testRefreshInterval)
+func newSvc(t *testing.T, fake *fakeGlobalDatasourceService) *ApplyService {
+	t.Helper()
+	svc, err := New(false, fake, v1.DiscoverySource{Name: "kube-prod", Type: v1.DiscoveryTypeKubernetes}, testRefreshInterval)
+	require.NoError(t, err)
+	return svc
 }
 
 // tests
 
 func TestApply_StampsSourceAndDiscoveryName(t *testing.T) {
 	fake := newFakeService()
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 
 	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1"), makeEntity("ds-a2")}))
 
@@ -183,7 +186,7 @@ func TestApply_DeletesStaleEntriesScopedToDiscovery(t *testing.T) {
 		stale,
 		storeEntityWithLastSeen("ds-b1", "kube-staging", now.Add(-3*testRefreshInterval)),
 	)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: now}
 
 	// kube-prod's new result contains only ds-a1 — ds-a2 has disappeared.
@@ -200,7 +203,7 @@ func TestApply_RespectsGracePeriod(t *testing.T) {
 		storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-3*testRefreshInterval)),
 		storeEntityWithLastSeen("ds-a2", "kube-prod", now.Add(-1*testRefreshInterval)),
 	)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: now}
 
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
@@ -215,7 +218,7 @@ func TestApply_NeverDeletesZeroLastSeen(t *testing.T) {
 		storeEntityWithLastSeen("ds-a1", "kube-prod", time.Now().Add(-3*testRefreshInterval)),
 		storeEntity("ds-a2", "kube-prod"), // zero LastSeen
 	)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
 
@@ -230,7 +233,7 @@ func TestApply_NoDeleteWhenListErrors(t *testing.T) {
 		storeEntityWithLastSeen("ds-a2", "kube-prod", now.Add(-3*testRefreshInterval)),
 	)
 	fake.listError = fmt.Errorf("database unavailable")
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: now}
 
 	// ds-a1 is still discovered; ds-a2 is not — but List fails, so no deletion should occur.
@@ -245,7 +248,7 @@ func TestApply_UpdatesExistingOwnedDatasource(t *testing.T) {
 	existing := storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-2*testRefreshInterval))
 	existing.Spec.Default = false
 	fake := newFakeService(existing)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: now}
 
 	updated := makeEntity("ds-a1")
@@ -262,7 +265,7 @@ func TestApply_UpdatesExistingOwnedDatasource(t *testing.T) {
 
 func TestApply_DoesNotTakeOverAnotherDiscoverysDatasource(t *testing.T) {
 	fake := newFakeService(storeEntity("ds-b1", "kube-staging"))
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 
 	assert.Error(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-b1")}),
 		"attempting to claim another discovery's datasource should return an error")
@@ -275,7 +278,7 @@ func TestApply_DoesNotTakeOverAnotherDiscoverysDatasource(t *testing.T) {
 func TestApply_AdoptsNilSourceDatasource(t *testing.T) {
 	manual := makeEntity("ds-manual")
 	fake := newFakeService(manual)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 
 	require.NoError(t, svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-manual")}))
 
@@ -290,7 +293,7 @@ func TestApplyService_PreservesDefault(t *testing.T) {
 	existing := storeEntityWithLastSeen("ds-a1", "kube-prod", now.Add(-2*testRefreshInterval))
 	existing.Spec.Default = true
 	fake := newFakeService(existing)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: now}
 
 	// The newly discovered entity does NOT have Default set.
@@ -310,7 +313,7 @@ func TestApply_MultiReplica_SecondReplicaSkipsUpdateWhenRecentAndSpecUnchanged(t
 
 	// Replica 2 runs at t1 + 30s (well within refresh_interval of 5m).
 	t2 := t1.Add(30 * time.Second)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: t2}
 
 	// Spec is unchanged.
@@ -330,7 +333,7 @@ func TestApply_MultiReplica_UpdatesWhenLastSeenExpired(t *testing.T) {
 
 	// Replica runs after more than one refresh_interval has elapsed.
 	t2 := t1.Add(testRefreshInterval + time.Second)
-	svc := newSvc(fake)
+	svc := newSvc(t, fake)
 	svc.clock = &fakeClock{now: t2}
 
 	svc.Apply(context.Background(), []*v1.GlobalDatasource{makeEntity("ds-a1")})
