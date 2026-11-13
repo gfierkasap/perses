@@ -14,6 +14,8 @@
 package discovery
 
 import (
+	"time"
+
 	"github.com/perses/common/async/taskhelper"
 	"github.com/perses/perses/internal/api/dependency"
 	httpsd "github.com/perses/perses/internal/api/discovery/http"
@@ -30,10 +32,10 @@ func New(cfg config.Config, serviceManager dependency.ServiceManager, caseSensit
 		var err error
 		switch {
 		case c.HTTPDiscovery != nil:
-			svc := service.New(caseSensitive, serviceManager.GetGlobalDatasource(), v1.DiscoverySource{Name: c.Name, Type: v1.DiscoveryTypeHTTP})
+			svc := service.New(caseSensitive, serviceManager.GetGlobalDatasource(), v1.DiscoverySource{Name: c.Name, Type: v1.DiscoveryTypeHTTP}, time.Duration(c.RefreshInterval))
 			helper, err = httpsd.NewDiscovery(c.Name, c.RefreshInterval, c.HTTPDiscovery, svc)
 		case c.KubernetesDiscovery != nil:
-			svc := service.New(caseSensitive, serviceManager.GetGlobalDatasource(), v1.DiscoverySource{Name: c.Name, Type: v1.DiscoveryTypeKubernetes})
+			svc := service.New(caseSensitive, serviceManager.GetGlobalDatasource(), v1.DiscoverySource{Name: c.Name, Type: v1.DiscoveryTypeKubernetes}, time.Duration(c.RefreshInterval))
 			helper, err = kubesd.NewDiscovery(c.Name, c.RefreshInterval, c.KubernetesDiscovery, svc, serviceManager.GetSchema())
 		}
 		if err != nil {
